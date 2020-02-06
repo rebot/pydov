@@ -1,11 +1,25 @@
 # -*- coding: utf-8 -*-
 """Module implementing a simple hooks system to allow late-binding actions to
 PyDOV events."""
-
+import atexit
+import json
+import os
+import uuid
+import zipfile
+from hashlib import md5
 from multiprocessing import Lock
+from pathlib import Path
 
+import numpy
+import pandas
+import requests
 import sys
 import time
+
+import owslib
+from owslib.etree import etree
+import pydov
+from pydov.util.errors import LogReplayError
 
 
 class AbstractHook(object):
@@ -313,3 +327,175 @@ class SimpleStatusHook(AbstractHook):
         """
         with self.lock:
             self._write_progress('.')
+
+
+class RepeatableLogRecorder(AbstractHook):
+    def __init__(self, log_directory):
+        self.log_directory = log_directory
+        self.log_archive = os.path.join(
+            self.log_directory,
+            time.strftime('pydov-archive-%Y%m%dT%H%M%S-{}.zip'.format(
+                str(uuid.uuid4())[0:6]))
+        )
+
+        self.log_archive_file = zipfile.ZipFile(
+            self.log_archive, 'w', compression=zipfile.ZIP_DEFLATED)
+
+        self.metadata = {
+            'versions': {
+                'pydov': pydov.__version__,
+                'owslib': owslib.__version__,
+                'pandas': pandas.__version__,
+                'numpy': numpy.__version__,
+                'requests': requests.__version__
+            },
+            'timings': {
+                'start': time.strftime('%Y%m%d-%H%M%S')
+            }
+        }
+        self.started_at = time.perf_counter()
+
+        pydov_root = Path(pydov.__file__).parent
+        for f in pydov_root.glob('**\\*.py'):
+            self.log_archive_file.write(
+                str(f), 'pydov/' + str(f.relative_to(pydov_root)))
+
+        self.lock = Lock()
+
+        atexit.register(self.pydov_exit)
+
+    def pydov_exit(self):
+        self.metadata['timings']['end'] = time.strftime('%Y%m%d-%H%M%S')
+        self.metadata['timings']['run_time_secs'] = (
+            time.perf_counter() - self.started_at)
+
+        self.log_archive_file.writestr(
+            'metadata.json', json.dumps(self.metadata, indent=2))
+        self.log_archive_file.close()
+
+        print('pydov session was saved as {}'.format(self.log_archive))
+
+    def meta_received(self, url, response):
+        hash = md5(url.encode('utf8')).hexdigest()
+        log_path = 'meta/' + hash + '.log'
+
+        if log_path not in self.log_archive_file.namelist():
+            self.log_archive_file.writestr(log_path, response.decode('utf8'))
+
+    def inject_meta_response(self, url):
+        hash = md5(url.encode('utf8')).hexdigest()
+        log_path = 'meta/' + hash + '.log'
+
+        if log_path not in self.log_archive_file.namelist():
+            return None
+
+        with self.log_archive_file.open(log_path, 'r') as log_file:
+            response = log_file.read().decode('utf8')
+
+        return response
+
+    def wfs_search_result_received(self, query, features):
+        q = etree.tostring(query, encoding='unicode')
+        hash = md5(q.encode('utf8')).hexdigest()
+        log_path = 'wfs/' + hash + '.log'
+
+        if log_path not in self.log_archive_file.namelist():
+            self.log_archive_file.writestr(
+                log_path,
+                etree.tostring(features, encoding='utf8').decode('utf8'))
+
+    def inject_wfs_getfeature_response(self, query):
+        q = etree.tostring(query, encoding='unicode')
+        hash = md5(q.encode('utf8')).hexdigest()
+        log_path = 'wfs/' + hash + '.log'
+
+        if log_path not in self.log_archive_file.namelist():
+            return None
+
+        with self.log_archive_file.open(log_path, 'r') as log_file:
+            tree = log_file.read().decode('utf8')
+
+        return tree
+
+    def xml_received(self, pkey_object, xml):
+        with self.lock:
+            hash = md5(pkey_object.encode('utf8')).hexdigest()
+            log_path = 'xml/' + hash + '.log'
+
+            if log_path not in self.log_archive_file.namelist():
+                self.log_archive_file.writestr(log_path, xml.decode('utf8'))
+
+    def inject_xml_response(self, pkey_object):
+        with self.lock:
+            hash = md5(pkey_object.encode('utf8')).hexdigest()
+            log_path = 'xml/' + hash + '.log'
+
+            if log_path not in self.log_archive_file.namelist():
+                return None
+
+            with self.log_archive_file.open(log_path, 'r') as log_file:
+                xml = log_file.read().decode('utf8')
+
+            return xml
+
+
+class RepeatableLogReplayer(AbstractHook):
+    def __init__(self, log_archive):
+        self.log_archive = log_archive
+
+        self.log_archive_file = zipfile.ZipFile(
+            self.log_archive, 'r', compression=zipfile.ZIP_DEFLATED)
+
+        self.lock = Lock()
+
+        atexit.register(self.pydov_exit)
+
+    def pydov_exit(self):
+        self.log_archive_file.close()
+
+    def inject_meta_response(self, url):
+        hash = md5(url.encode('utf8')).hexdigest()
+        log_path = 'meta/' + hash + '.log'
+
+        if log_path not in self.log_archive_file.namelist():
+            raise LogReplayError(
+                'Failed to replay log: no entry for '
+                'meta response of {}.'.format(hash)
+            )
+
+        with self.log_archive_file.open(log_path, 'r') as log_file:
+            response = log_file.read().decode('utf8')
+
+        return response
+
+    def inject_wfs_getfeature_response(self, query):
+        q = etree.tostring(query, encoding='unicode')
+        hash = md5(q.encode('utf8')).hexdigest()
+        log_path = 'wfs/' + hash + '.log'
+
+        if log_path not in self.log_archive_file.namelist():
+            raise LogReplayError(
+                'Failed to replay log: no entry for '
+                'WFS result of {}.'.format(hash)
+            )
+
+        with self.log_archive_file.open(log_path, 'r') as log_file:
+            tree = log_file.read().decode('utf8')
+
+        return tree
+
+    def inject_xml_response(self, pkey_object):
+        with self.lock:
+            hash = md5(pkey_object.encode('utf8')).hexdigest()
+            log_path = 'xml/' + hash + '.log'
+
+            if log_path not in self.log_archive_file.namelist():
+                raise LogReplayError(
+                    'Failed to replay log: no entry for '
+                    'XML result of {}.'.format(hash)
+                )
+
+            with self.log_archive_file.open(log_path, 'r') as log_file:
+                xml = log_file.read().decode('utf8')
+
+            return xml
