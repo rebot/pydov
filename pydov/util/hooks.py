@@ -330,8 +330,34 @@ class SimpleStatusHook(AbstractHook):
 
 
 class RepeatableLogRecorder(AbstractHook):
+    """Class for recording a pydov session into a ZIP archive.
+
+    This enables to save (the results of) all metadata and data requests from
+    the DOV services locally on disk.
+
+    The saved ZIP archive can subsequently be used in the
+    `RepeatableLogReplayer` to replay the saved session allowing fully
+    reproducible pydov runs.
+
+    """
     def __init__(self, log_directory):
+        """Initialise a RepeatableLogRecorder hook.
+
+        It will save a ZIP archive with the current pydov session's data in
+        the given log directory.
+
+        Parameters
+        ----------
+        log_directory : str
+            Path to a directory on disk where the ZIP archive containing the
+            pydov session will be saved. Will be created if it does not exist.
+
+        """
         self.log_directory = log_directory
+
+        if not os.path.exists(self.log_directory):
+            os.makedirs(self.log_directory)
+
         self.log_archive = os.path.join(
             self.log_directory,
             time.strftime('pydov-archive-%Y%m%dT%H%M%S-{}.zip'.format(
@@ -355,16 +381,33 @@ class RepeatableLogRecorder(AbstractHook):
         }
         self.started_at = time.perf_counter()
 
+        self._store_pydov_code()
+
+        self.lock = Lock()
+        atexit.register(self._pydov_exit)
+
+    def _store_pydov_code(self):
+        """Store the pydov source code itself in the archive.
+
+        To get a fully reproducible pydov run, one has to a) save and replay
+        all remote DOV data and b) rerun with the same pydov version for code
+        changes can effect the result too.
+
+        One can rerun an archive with the saved code by prepending the ZIP
+        archive to the system path before importing pydov::
+
+            import sys
+            sys.path.insert(0, r'C:\pydov-archive-20200128T134936-96bda7.zip')
+            import pydov
+
+        """
         pydov_root = Path(pydov.__file__).parent
         for f in pydov_root.glob('**\\*.py'):
             self.log_archive_file.write(
                 str(f), 'pydov/' + str(f.relative_to(pydov_root)))
 
-        self.lock = Lock()
-
-        atexit.register(self.pydov_exit)
-
-    def pydov_exit(self):
+    def _pydov_exit(self):
+        """Save metadata and close ZIP archive before ending Python session."""
         self.metadata['timings']['end'] = time.strftime('%Y%m%d-%H%M%S')
         self.metadata['timings']['run_time_secs'] = (
             time.perf_counter() - self.started_at)
@@ -376,15 +419,45 @@ class RepeatableLogRecorder(AbstractHook):
         print('pydov session was saved as {}'.format(self.log_archive))
 
     def meta_received(self, url, response):
-        hash = md5(url.encode('utf8')).hexdigest()
-        log_path = 'meta/' + hash + '.log'
+        """Called when a response for a metadata requests is received.
+
+        Create a stable hash based on the URL and archive the response.
+
+        Parameters
+        ----------
+        url : str
+            URL of the metadata request.
+        response : bytes
+            The raw response as received from resolving the URL.
+
+        """
+        md5_hash = md5(url.encode('utf8')).hexdigest()
+        log_path = 'meta/' + md5_hash + '.log'
 
         if log_path not in self.log_archive_file.namelist():
             self.log_archive_file.writestr(log_path, response.decode('utf8'))
 
     def inject_meta_response(self, url):
-        hash = md5(url.encode('utf8')).hexdigest()
-        log_path = 'meta/' + hash + '.log'
+        """Inject a response for a metadata request.
+
+        Create a stable hash based on the URL and inject a previously saved
+        response if available. If no previous response is available, return
+        None to resume normal pydov flow.
+
+        Parameters
+        ----------
+        url : str
+            URL of the metadata request.
+
+        Returns
+        -------
+        bytes, optional
+            The response to use in favor of resolving the URL. Returns None if
+            no previously recorded response is available for this request.
+
+        """
+        md5_hash = md5(url.encode('utf8')).hexdigest()
+        log_path = 'meta/' + md5_hash + '.log'
 
         if log_path not in self.log_archive_file.namelist():
             return None
@@ -396,8 +469,8 @@ class RepeatableLogRecorder(AbstractHook):
 
     def wfs_search_result_received(self, query, features):
         q = etree.tostring(query, encoding='unicode')
-        hash = md5(q.encode('utf8')).hexdigest()
-        log_path = 'wfs/' + hash + '.log'
+        md5_hash = md5(q.encode('utf8')).hexdigest()
+        log_path = 'wfs/' + md5_hash + '.log'
 
         if log_path not in self.log_archive_file.namelist():
             self.log_archive_file.writestr(
@@ -406,8 +479,8 @@ class RepeatableLogRecorder(AbstractHook):
 
     def inject_wfs_getfeature_response(self, query):
         q = etree.tostring(query, encoding='unicode')
-        hash = md5(q.encode('utf8')).hexdigest()
-        log_path = 'wfs/' + hash + '.log'
+        md5_hash = md5(q.encode('utf8')).hexdigest()
+        log_path = 'wfs/' + md5_hash + '.log'
 
         if log_path not in self.log_archive_file.namelist():
             return None
@@ -419,16 +492,16 @@ class RepeatableLogRecorder(AbstractHook):
 
     def xml_received(self, pkey_object, xml):
         with self.lock:
-            hash = md5(pkey_object.encode('utf8')).hexdigest()
-            log_path = 'xml/' + hash + '.log'
+            md5_hash = md5(pkey_object.encode('utf8')).hexdigest()
+            log_path = 'xml/' + md5_hash + '.log'
 
             if log_path not in self.log_archive_file.namelist():
                 self.log_archive_file.writestr(log_path, xml.decode('utf8'))
 
     def inject_xml_response(self, pkey_object):
         with self.lock:
-            hash = md5(pkey_object.encode('utf8')).hexdigest()
-            log_path = 'xml/' + hash + '.log'
+            md5_hash = md5(pkey_object.encode('utf8')).hexdigest()
+            log_path = 'xml/' + md5_hash + '.log'
 
             if log_path not in self.log_archive_file.namelist():
                 return None
