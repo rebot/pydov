@@ -346,6 +346,12 @@ class RepeatableLogRecorder(AbstractHook):
         It will save a ZIP archive with the current pydov session's data in
         the given log directory.
 
+        Replays previously saved responses in the current session too to
+        enable full reproducibility between the session being saved and replays
+        of the saved ZIP archive. When this would be omitted they would not
+        necessarily yield the same results due to timing issues (albeit
+        quite far fetched).
+
         Parameters
         ----------
         log_directory : str
@@ -397,7 +403,7 @@ class RepeatableLogRecorder(AbstractHook):
         archive to the system path before importing pydov::
 
             import sys
-            sys.path.insert(0, r'C:\pydov-archive-20200128T134936-96bda7.zip')
+            sys.path.insert(0, 'C:\\pydov-archive-20200128T134936-96bda7.zip')
             import pydov
 
         """
@@ -468,6 +474,19 @@ class RepeatableLogRecorder(AbstractHook):
         return response
 
     def wfs_search_result_received(self, query, features):
+        """Called after a WFS search finished.
+
+        Create a stable hash based on the query and archive the feature
+        response.
+
+        Parameters
+        ----------
+        query : etree.ElementTree
+            The WFS GetFeature request sent to the WFS server.
+        features : etree.ElementTree
+            The WFS GetFeature response containings the features.
+
+        """
         q = etree.tostring(query, encoding='unicode')
         md5_hash = md5(q.encode('utf8')).hexdigest()
         log_path = 'wfs/' + md5_hash + '.log'
@@ -478,6 +497,24 @@ class RepeatableLogRecorder(AbstractHook):
                 etree.tostring(features, encoding='utf8').decode('utf8'))
 
     def inject_wfs_getfeature_response(self, query):
+        """Inject a response for a WFS GetFeature request.
+
+        Create a stable hash based on the query and inject a previously saved
+        response if available. If no previous response is available, return
+        None to resume normal pydov flow.
+
+        Parameters
+        ----------
+        query : etree.ElementTree
+            The WFS GetFeature request sent to the WFS server.
+
+        Returns
+        -------
+        xml: bytes, optional
+            The GetFeature response to use in favor of resolving the URL.
+            Return None to disable this inject hook.
+
+        """
         q = etree.tostring(query, encoding='unicode')
         md5_hash = md5(q.encode('utf8')).hexdigest()
         log_path = 'wfs/' + md5_hash + '.log'
@@ -491,6 +528,20 @@ class RepeatableLogRecorder(AbstractHook):
         return tree
 
     def xml_received(self, pkey_object, xml):
+        """Called when the XML of a given object is received, either from
+        the cache or from the remote DOV service.
+
+        Create a stable hash based on the pkey_object and archive the xml
+        response.
+
+        Parameters
+        ----------
+        pkey_object : str
+            Permanent key of the retrieved object.
+        xml : bytes
+            The raw XML data of this DOV object as bytes.
+
+        """
         with self.lock:
             md5_hash = md5(pkey_object.encode('utf8')).hexdigest()
             log_path = 'xml/' + md5_hash + '.log'
@@ -499,6 +550,24 @@ class RepeatableLogRecorder(AbstractHook):
                 self.log_archive_file.writestr(log_path, xml.decode('utf8'))
 
     def inject_xml_response(self, pkey_object):
+        """Inject a response for a DOV XML request.
+
+        Create a stable hash based on the pkey_object and inject a previously
+        saved response if available. If no previous response is available,
+        return None to resume normal pydov flow.
+
+        Parameters
+        ----------
+        query : etree.ElementTree
+            The WFS GetFeature request sent to the WFS server.
+
+        Returns
+        -------
+        xml : bytes, optional
+            The XML response to use in favor of resolving the URL. Return
+            None to disable this inject hook.
+
+        """
         with self.lock:
             md5_hash = md5(pkey_object.encode('utf8')).hexdigest()
             log_path = 'xml/' + md5_hash + '.log'
