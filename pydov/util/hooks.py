@@ -178,8 +178,8 @@ class AbstractHook(object):
 
         Parameters
         ----------
-        query : etree.ElementTree
-            The WFS GetFeature request sent to the WFS server.
+        pkey_object : str
+            The permanent key of the DOV object.
 
         Returns
         -------
@@ -558,8 +558,8 @@ class RepeatableLogRecorder(AbstractHook):
 
         Parameters
         ----------
-        query : etree.ElementTree
-            The WFS GetFeature request sent to the WFS server.
+        pkey_object : str
+            The permanent key of the DOV object.
 
         Returns
         -------
@@ -582,7 +582,24 @@ class RepeatableLogRecorder(AbstractHook):
 
 
 class RepeatableLogReplayer(AbstractHook):
+    """Class for replaying a saved pydov session from a ZIP archive.
+
+    This will reroute all external requests to the saved results in the ZIP
+    archive, enabling fully reproducable pydov runs.
+
+    """
     def __init__(self, log_archive):
+        """Initialise a RepeatableLogReplayer hook.
+
+        It will reroute all external requests to the saved results in the
+        given ZIP archive.
+
+        Parameters
+        ----------
+        log_archive : str
+            Path to the ZIP archive to use for replay.
+
+        """
         self.log_archive = log_archive
 
         self.log_archive_file = zipfile.ZipFile(
@@ -590,19 +607,43 @@ class RepeatableLogReplayer(AbstractHook):
 
         self.lock = Lock()
 
-        atexit.register(self.pydov_exit)
+        atexit.register(self._pydov_exit)
 
-    def pydov_exit(self):
+    def _pydov_exit(self):
+        """Close ZIP archive before ending Python session."""
         self.log_archive_file.close()
 
     def inject_meta_response(self, url):
-        hash = md5(url.encode('utf8')).hexdigest()
-        log_path = 'meta/' + hash + '.log'
+        """Inject a response for a metadata request.
+
+        Create a stable hash based on the URL and inject the previously saved
+        response.
+
+        Parameters
+        ----------
+        url : str
+            URL of the metadata request.
+
+        Returns
+        -------
+        bytes, optional
+            The response to use in favor of resolving the URL.
+
+        Raises
+        ------
+        pydov.util.errors.LogReplayError
+            When the response required for this URL could not be found in the
+            archive. This happens for instance when replaying an archive for
+            a different pydov session than the one it was saved for.
+
+        """
+        md5_hash = md5(url.encode('utf8')).hexdigest()
+        log_path = 'meta/' + md5_hash + '.log'
 
         if log_path not in self.log_archive_file.namelist():
             raise LogReplayError(
                 'Failed to replay log: no entry for '
-                'meta response of {}.'.format(hash)
+                'meta response of {}.'.format(md5_hash)
             )
 
         with self.log_archive_file.open(log_path, 'r') as log_file:
@@ -611,14 +652,37 @@ class RepeatableLogReplayer(AbstractHook):
         return response
 
     def inject_wfs_getfeature_response(self, query):
+        """Inject a response for a WFS GetFeature request.
+
+        Create a stable hash based on the query and inject the previously saved
+        response.
+
+        Parameters
+        ----------
+        query : etree.ElementTree
+            The WFS GetFeature request sent to the WFS server.
+
+        Returns
+        -------
+        xml: bytes, optional
+            The GetFeature response to use in favor of resolving the URL.
+
+        Raises
+        ------
+        pydov.util.errors.LogReplayError
+            When the response required for this URL could not be found in the
+            archive. This happens for instance when replaying an archive for
+            a different pydov session than the one it was saved for.
+
+        """
         q = etree.tostring(query, encoding='unicode')
-        hash = md5(q.encode('utf8')).hexdigest()
-        log_path = 'wfs/' + hash + '.log'
+        md5_hash = md5(q.encode('utf8')).hexdigest()
+        log_path = 'wfs/' + md5_hash + '.log'
 
         if log_path not in self.log_archive_file.namelist():
             raise LogReplayError(
                 'Failed to replay log: no entry for '
-                'WFS result of {}.'.format(hash)
+                'WFS result of {}.'.format(md5_hash)
             )
 
         with self.log_archive_file.open(log_path, 'r') as log_file:
@@ -627,14 +691,38 @@ class RepeatableLogReplayer(AbstractHook):
         return tree
 
     def inject_xml_response(self, pkey_object):
+        """Inject a response for a DOV XML request.
+
+        Create a stable hash based on the pkey_object and inject the previously
+        saved response.
+
+        Parameters
+        ----------
+        pkey_object : str
+            The permanent key of the DOV object.
+
+        Returns
+        -------
+        xml : bytes, optional
+            The XML response to use in favor of resolving the URL. Return
+            None to disable this inject hook.
+
+        Raises
+        ------
+        pydov.util.errors.LogReplayError
+            When the response required for this URL could not be found in the
+            archive. This happens for instance when replaying an archive for
+            a different pydov session than the one it was saved for.
+
+        """
         with self.lock:
-            hash = md5(pkey_object.encode('utf8')).hexdigest()
-            log_path = 'xml/' + hash + '.log'
+            md5_hash = md5(pkey_object.encode('utf8')).hexdigest()
+            log_path = 'xml/' + md5_hash + '.log'
 
             if log_path not in self.log_archive_file.namelist():
                 raise LogReplayError(
                     'Failed to replay log: no entry for '
-                    'XML result of {}.'.format(hash)
+                    'XML result of {}.'.format(md5_hash)
                 )
 
             with self.log_archive_file.open(log_path, 'r') as log_file:
