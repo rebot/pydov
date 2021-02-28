@@ -84,10 +84,10 @@ jobs:
           conda update -n base -c defaults conda
           conda install --name pydov --file requirements.txt
           conda list
-      - name: Install development dependencies with pip
+      - name: Install development dependencies with conda
         shell: pwsh
         run: |
-          pip install -r requirements_dev.txt
+          conda install --name pydov --file requirements_dev.txt
           conda list
       - name: Run unit tests
         shell: pwsh
